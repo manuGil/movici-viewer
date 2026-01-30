@@ -56,9 +56,9 @@ jobs:
       with:
         submodules: recursive
 
-    - uses: actions/setup-node@v3
+    - uses: actions/setup-node@v6
       with:
-        node-version: 19
+        node-version: 22
 
     - name: Install Poetry
       uses: snok/install-poetry@v1
