@@ -75,4 +75,4 @@ jobs:
       uses: pypa/gh-action-pypi-publish@release/v1
       with:
         packages-dir: server/dist
-        repository-url.PYPI_REPOSITORY_URL }} # leave empty for default
+        repository-url: ${{ vars.PYPI_REPOSITORY_URL }} # leave empty for default
