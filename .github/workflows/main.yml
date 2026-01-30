@@ -51,6 +51,8 @@ jobs:
     environment: PyPI
     runs-on: ubuntu-latest
     needs: [test-all-platforms]
+    permissions:
+      id-token: write
     steps:
     - uses: actions/checkout@v4
       with:
