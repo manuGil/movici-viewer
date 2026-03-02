@@ -23,7 +23,7 @@ init: pre-init ui
 	cd server \
 	&& poetry install --extras dev
 
-data_dir=/tests/data
+data_dir=tests/data
 port=5000
 
 export data_dir
