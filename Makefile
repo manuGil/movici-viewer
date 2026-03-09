@@ -23,7 +23,8 @@ init: pre-init ui
 	cd server \
 	&& poetry install --extras dev
 
-data_dir=tests/data
+data_dir=tests/data/
+# data_dir=/Users/mgarciaalvarez/devel/movici/ritri_new/
 port=5000
 
 export data_dir
