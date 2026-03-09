@@ -5,6 +5,12 @@ const router = createRouter({
   history: createWebHashHistory(),
   routes: [
     {
+      path: "/editor/:uuid",
+      name: "editor",
+      component: () => import("@/views/EditorView.vue"),
+      props: true,
+    },
+    {
       path: "/:step?",
       name: "home",
       component: FlowWrapperView,

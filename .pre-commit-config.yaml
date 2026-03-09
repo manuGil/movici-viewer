@@ -23,4 +23,4 @@ repos:
     name: Prettier
     language: node
     files: "^client/src/"
-    entry: prettier --write
+    entry: npx prettier --write

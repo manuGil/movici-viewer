@@ -146,6 +146,33 @@ export class GetScenarioState<T = any> extends Request<DatasetWithData<T>> {
   }
 }
 
+export interface DatasetPatch {
+  data: Record<string, Record<string, unknown[]>>;
+}
+
+export class PatchDataset extends Request<void> {
+  private datasetUUID: UUID;
+  private patch: DatasetPatch;
+
+  constructor(datasetUUID: UUID, patch: DatasetPatch) {
+    super();
+    this.datasetUUID = datasetUUID;
+    this.patch = patch;
+  }
+
+  makeRequest(): AxiosRequestConfig {
+    return {
+      method: "patch",
+      url: `${uri.datasets}/${this.datasetUUID}`,
+      data: this.patch,
+    };
+  }
+
+  makeResponse() {
+    return;
+  }
+}
+
 export function getDatasetFilterParams(
   entityGroup?: string,
   properties?: DataAttribute[],

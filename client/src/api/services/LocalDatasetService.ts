@@ -6,7 +6,14 @@ import type {
   IClient,
   UUID,
 } from "@movici-flow-lib/types";
-import { GetDataset, GetDatasetData, GetDatasets, GetScenarioState } from "@/api/requests/datasets";
+import {
+  GetDataset,
+  GetDatasetData,
+  GetDatasets,
+  GetScenarioState,
+  PatchDataset,
+} from "@/api/requests/datasets";
+import type { DatasetPatch } from "@/api/requests/datasets";
 
 type getDataParams = {
   datasetUUID: UUID;
@@ -46,5 +53,9 @@ export default class LocalDatasetService implements DatasetService {
   }
   async getMetaData(datasetUUID: string): Promise<Dataset | null> {
     return await this.client.request(new GetDataset(datasetUUID));
+  }
+
+  async patch(datasetUUID: UUID, patch: DatasetPatch): Promise<void> {
+    await this.client.request(new PatchDataset(datasetUUID, patch));
   }
 }
