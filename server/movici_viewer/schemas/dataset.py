@@ -36,4 +36,15 @@ class DatasetWithData(Dataset):
     )
 
 
+class DatasetPatch(BaseModel):
+    """Partial update payload for a dataset."""
+
+    data: t.Dict[str, t.Dict[str, t.List]] = Field(
+        description=(
+            "Entity data to patch, keyed by entity group name then property name. "
+            'e.g. {"road_segment_entities": {"id": [1, 2], "label": [0, 1]}}'
+        )
+    )
+
+
 DatasetCollection.update_forward_refs()

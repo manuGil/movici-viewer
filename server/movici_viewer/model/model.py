@@ -89,6 +89,31 @@ class Repository:
     def get_update(self, update_uuid: str):
         return self.source.get_update(update_uuid)
 
+    def patch_dataset(self, uuid: str, patch: dict) -> None:
+        path = self.source.get_dataset_path(uuid)
+        if path.suffix != ".json":
+            raise InvalidObject("dataset", uuid)
+        content = json.loads(path.read_bytes())
+        patch_data = patch.get("data", {})
+        for entity_group, properties in patch_data.items():
+            group_data = content.get("data", {}).get(entity_group)
+            if group_data is None:
+                continue
+            ids = group_data.get("id", [])
+            id_index = {v: i for i, v in enumerate(ids)}
+            patch_ids = properties.get("id", [])
+            for prop_name, values in properties.items():
+                if prop_name == "id":
+                    continue
+                if prop_name not in group_data:
+                    continue
+                for patch_id, new_value in zip(patch_ids, values):
+                    idx = id_index.get(patch_id)
+                    if idx is not None:
+                        group_data[prop_name][idx] = new_value
+        path.write_text(json.dumps(content, option=json.OPT_INDENT_2).decode())
+        self.cache_clear()
+
     def get_dataset_summary(self, dataset_uuid):
         return self.source.get_dataset_summary(dataset_uuid)
 
