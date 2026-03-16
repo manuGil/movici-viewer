@@ -1,13 +1,28 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
+import type { GeometryType } from "@/utils/geoJsonBridge";
 
-export interface Command {
+export interface PropertyCommand {
+  kind: "property";
   entityGroup: string;
   id: number;
   property: string;
   oldValue: unknown;
   newValue: unknown;
 }
+
+export interface GeometryCommand {
+  kind: "geometry";
+  entityGroup: string;
+  id: number;
+  featureIdx: number;
+  geomType: GeometryType;
+  geomKey: string;
+  oldGeomColumns: Record<string, unknown>;
+  newGeomColumns: Record<string, unknown>;
+}
+
+export type Command = PropertyCommand | GeometryCommand;
 
 export const useEditorHistoryStore = defineStore("editorHistory", () => {
   const undoStack = ref<Command[]>([]);

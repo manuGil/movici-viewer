@@ -1,5 +1,5 @@
 <template>
-  <div class="editor-view" @keydown="onKeyDown">
+  <div class="editor-view" @keydown="onKeyDown" tabindex="-1">
     <EditorToolbar />
     <div class="editor-body">
       <div class="editor-map">
@@ -11,6 +11,7 @@
               @update:model-value="onViewstateChange($event)"
             />
             <MapControlBaseMap :model-value="basemap" @update:model-value="basemap = $event" />
+            <EditModeToolbar />
           </template>
           <template #control-zero="{ on }">
             <span ref="deckOnRef" :data-on="registerOn(on)" style="display: none" />
@@ -34,6 +35,7 @@ import MapControlNavigation from "@movici-flow-lib/components/mapControls/MapCon
 import MapControlBaseMap from "@movici-flow-lib/components/mapControls/MapControlBaseMap.vue";
 import EditorToolbar from "@/components/editor/EditorToolbar.vue";
 import EditorSidebar from "@/components/editor/EditorSidebar.vue";
+import EditModeToolbar from "@/components/editor/EditModeToolbar.vue";
 
 const props = defineProps<{
   uuid: string;
@@ -57,17 +59,21 @@ function registerOn(on: (event: "click", callbacks: Record<string, DeckEventCall
   on("click", {
     editorClick: (payload) => {
       const info = payload.pickInfo;
-      if (info?.object?.id !== undefined) {
-        // Also switch entity group if different
-        const layerId: string = info.layer?.id ?? "";
-        const groupMatch = layerId.match(/^editor-(?:points|paths|polygons)-(.+)$/);
+      // info.object is a GeoJSON Feature with properties.__id
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const obj = info?.object as any;
+      const entityId = obj?.properties?.__id;
+      if (entityId !== undefined && info != null) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const layerId: string = (info as any).layer?.id ?? "";
+        const groupMatch = layerId.match(/^editor-(.+)$/);
         if (groupMatch?.[1]) {
           const clickedGroup = groupMatch[1];
           if (clickedGroup !== store.entityGroup) {
             store.selectEntityGroup(clickedGroup);
           }
         }
-        store.selectEntity(info.object.id as number);
+        store.selectEntity(entityId as number);
       } else {
         store.clearSelection();
       }
@@ -83,6 +89,8 @@ function onKeyDown(e: KeyboardEvent) {
   } else if (e.ctrlKey && e.key === "y") {
     e.preventDefault();
     store.redo();
+  } else if (e.key === "Escape") {
+    store.setEditMode("view");
   }
 }
 
@@ -99,22 +107,29 @@ function padBBox(
   return [cx - halfW, cy - halfH, cx + halfW, cy + halfH];
 }
 
-onMounted(async () => {
-  await store.loadDataset(props.uuid);
+async function loadAndInit(uuid: string) {
+  await store.loadDataset(uuid);
+  if (store.dataset) {
+    await ensureProjection(store.dataset.epsg_code);
+    store.initWgs84Features();
+  }
   if (store.boundingBox) {
-    await ensureProjection(store.dataset?.epsg_code);
     const rawBbox = transformBBox(store.boundingBox, store.dataset?.epsg_code);
     const bbox = padBBox(rawBbox);
     const cam = { bbox: { coords: bbox, fillRatio: 0.7 } };
     camera.value = cam;
     initialCamera.value = cam;
   }
+}
+
+onMounted(async () => {
+  await loadAndInit(props.uuid);
 });
 
 watch(
   () => props.uuid,
   async (uuid) => {
-    await store.loadDataset(uuid);
+    await loadAndInit(uuid);
   },
 );
 </script>

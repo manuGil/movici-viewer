@@ -1,13 +1,31 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { useMainStore } from "@/stores/main";
 import LocalDatasetService from "@/api/services/LocalDatasetService";
 import type { DatasetPatch } from "@/api/requests/datasets";
 import type { DatasetWithData } from "@movici-flow-lib/types";
-import { useEditorHistoryStore, type Command } from "./useEditorHistoryStore";
+import { ViewMode, ModifyMode, TranslateMode } from "@deck.gl-community/editable-layers";
+import type { Feature } from "geojson";
+import {
+  useEditorHistoryStore,
+  type Command,
+  type PropertyCommand,
+  type GeometryCommand,
+} from "./useEditorHistoryStore";
+import {
+  detectGeometryType,
+  getGeometryKey,
+  groupToFeatureCollection,
+  extractGeometryColumns,
+  geomColumnsToWgs84Geometry,
+  computeLinestringLength,
+} from "@/utils/geoJsonBridge";
 
 // changes[entityGroup][entityId][propName] = newValue
 type Changes = Map<string, Map<number, Record<string, unknown>>>;
+
+export type EditModeKey = "view" | "modify" | "translate";
 
 export const useEditorStore = defineStore("editor", () => {
   const datasetUUID = ref<string | null>(null);
@@ -15,8 +33,19 @@ export const useEditorStore = defineStore("editor", () => {
   const entityGroup = ref<string | null>(null);
   const selectedId = ref<number | null>(null);
   const changes = ref<Changes>(new Map());
+  const geometryChanges = ref<Changes>(new Map());
+  const wgs84Features = ref<Record<string, Feature[]>>({});
   const saving = ref(false);
   const error = ref<string | null>(null);
+
+  // Edit mode
+  const editModeKey = ref<EditModeKey>("view");
+  const modeInstances = {
+    view: new ViewMode(),
+    modify: new ModifyMode(),
+    translate: new TranslateMode(),
+  };
+  const editMode = computed(() => modeInstances[editModeKey.value]);
 
   const historyStore = useEditorHistoryStore();
 
@@ -124,6 +153,9 @@ export const useEditorStore = defineStore("editor", () => {
     for (const groupChanges of changes.value.values()) {
       if (groupChanges.size > 0) return true;
     }
+    for (const groupGeomChanges of geometryChanges.value.values()) {
+      if (groupGeomChanges.size > 0) return true;
+    }
     return false;
   });
 
@@ -132,24 +164,43 @@ export const useEditorStore = defineStore("editor", () => {
     for (const groupChanges of changes.value.values()) {
       count += groupChanges.size;
     }
+    for (const groupGeomChanges of geometryChanges.value.values()) {
+      count += groupGeomChanges.size;
+    }
     return count;
   });
 
   const patch = computed<DatasetPatch>(() => {
     const data: Record<string, Record<string, unknown[]>> = {};
-    for (const [group, groupChanges] of changes.value.entries()) {
-      if (groupChanges.size === 0) continue;
+
+    // Collect all entity groups that have any change
+    const allGroups = new Set([...changes.value.keys(), ...geometryChanges.value.keys()]);
+
+    for (const group of allGroups) {
+      const propChanges = changes.value.get(group) ?? new Map();
+      const geomChanges = geometryChanges.value.get(group) ?? new Map();
+
+      // Collect all entity IDs that have any change
+      const allIds = new Set([...propChanges.keys(), ...geomChanges.keys()]);
+      if (allIds.size === 0) continue;
+
       const ids: number[] = [];
       const propArrays: Record<string, unknown[]> = {};
-      for (const [id, props] of groupChanges.entries()) {
+
+      for (const id of allIds) {
         ids.push(id);
-        for (const [prop, value] of Object.entries(props)) {
-          if (!propArrays[prop]) propArrays[prop] = [];
-          propArrays[prop].push(value);
+        const props = propChanges.get(id) ?? {};
+        const geom = geomChanges.get(id) ?? {};
+        const allProps = { ...props, ...geom };
+        for (const [propName, value] of Object.entries(allProps)) {
+          if (!propArrays[propName]) propArrays[propName] = [];
+          propArrays[propName].push(value);
         }
       }
+
       data[group] = { id: ids, ...propArrays };
     }
+
     return { data };
   });
 
@@ -159,6 +210,8 @@ export const useEditorStore = defineStore("editor", () => {
     entityGroup.value = null;
     selectedId.value = null;
     changes.value = new Map();
+    geometryChanges.value = new Map();
+    wgs84Features.value = {};
     historyStore.clear();
     error.value = null;
 
@@ -174,6 +227,174 @@ export const useEditorStore = defineStore("editor", () => {
     }
   }
 
+  function initWgs84Features(): void {
+    if (!dataset.value?.data) {
+      wgs84Features.value = {};
+      return;
+    }
+    const epsg = dataset.value.epsg_code ?? null;
+    const result: Record<string, Feature[]> = {};
+    for (const [groupName, groupDataRaw] of Object.entries(dataset.value.data)) {
+      const groupData = groupDataRaw as Record<string, unknown[]>;
+      const fc = groupToFeatureCollection(groupData, epsg);
+      result[groupName] = fc.features;
+    }
+    wgs84Features.value = result;
+  }
+
+  function getOriginalGeomColumns(groupName: string, id: number): Record<string, unknown> {
+    const groupData = dataset.value?.data?.[groupName] as Record<string, unknown[]> | undefined;
+    if (!groupData) return {};
+    const geomType = detectGeometryType(groupData);
+    if (!geomType) return {};
+    const ids = (groupData["id"] as number[]) ?? [];
+    const idx = ids.indexOf(id);
+    if (idx === -1) return {};
+
+    if (geomType === "point") {
+      return {
+        "geometry.x": (groupData["geometry.x"] as number[])[idx],
+        "geometry.y": (groupData["geometry.y"] as number[])[idx],
+      };
+    }
+    const geomKey = getGeometryKey(groupData, geomType);
+    return { [geomKey]: (groupData[geomKey] as unknown[])[idx] };
+  }
+
+  /**
+   * Recompute shape.length for a linestring entity from its native-CRS coordinates and
+   * record the result as a property change (without adding to undo history).
+   * If the computed value matches the original stored value, reverts the change instead
+   * so the property is no longer marked as modified.
+   */
+  function syncShapeLength(
+    groupName: string,
+    id: number,
+    geomColumns: Record<string, unknown>,
+    geomKey: string,
+  ): void {
+    const groupData = dataset.value?.data?.[groupName] as Record<string, unknown[]> | undefined;
+    if (!groupData || !("shape.length" in groupData)) return;
+
+    const coords = geomColumns[geomKey] as number[][] | undefined;
+    if (!coords) return;
+    const newLength = computeLinestringLength(coords);
+
+    // Retrieve the original stored value
+    const ids = (groupData["id"] as number[]) ?? [];
+    const idx = ids.indexOf(id);
+    const originalLength = idx !== -1 ? (groupData["shape.length"] as number[])[idx] : undefined;
+
+    if (newLength === originalLength) {
+      revertProperty(groupName, id, "shape.length", true);
+    } else {
+      updateProperty(groupName, id, "shape.length", newLength, true /* skipHistory */);
+    }
+  }
+
+  function onGeometryEdit(
+    groupName: string,
+    updatedFeatures: Feature[],
+    featureIndexes: number[],
+    editType: string,
+  ): void {
+    // Always update live features for visual feedback
+    wgs84Features.value = { ...wgs84Features.value, [groupName]: updatedFeatures };
+
+    // Only commit to history and geometryChanges on final editTypes
+    const isFinal = ["finishMovePosition", "translated", "addPosition", "removePosition"].includes(
+      editType,
+    );
+    if (!isFinal) return;
+
+    const epsg = dataset.value?.epsg_code ?? null;
+    const groupData = dataset.value?.data?.[groupName] as Record<string, unknown[]> | undefined;
+    if (!groupData) return;
+
+    const geomType = detectGeometryType(groupData);
+    if (!geomType) return;
+    const geomKey = getGeometryKey(groupData, geomType);
+
+    for (const featureIdx of featureIndexes) {
+      const feature = updatedFeatures[featureIdx];
+      if (!feature) continue;
+      const id = (feature as any).properties?.__id as number | undefined;
+      if (id === undefined) continue;
+
+      const newGeomColumns = extractGeometryColumns(feature as any, geomType, geomKey, epsg);
+      const oldGeomColumns = getOriginalGeomColumns(groupName, id);
+
+      // Update geometryChanges
+      if (!geometryChanges.value.has(groupName)) {
+        geometryChanges.value.set(groupName, new Map());
+      }
+      const groupGeomChanges = geometryChanges.value.get(groupName)!;
+      if (!groupGeomChanges.has(id)) {
+        groupGeomChanges.set(id, {});
+      }
+      Object.assign(groupGeomChanges.get(id)!, newGeomColumns);
+
+      // Push to history
+      historyStore.push({
+        kind: "geometry",
+        entityGroup: groupName,
+        id,
+        featureIdx,
+        geomType,
+        geomKey,
+        oldGeomColumns,
+        newGeomColumns,
+      });
+
+      // Keep shape.length in sync (linestring only, no history entry)
+      if (geomType === "linestring") {
+        syncShapeLength(groupName, id, newGeomColumns, geomKey);
+      }
+    }
+  }
+
+  function applyGeometryCommand(cmd: GeometryCommand, isUndo: boolean) {
+    const geomToApply = isUndo ? cmd.oldGeomColumns : cmd.newGeomColumns;
+    const epsg = dataset.value?.epsg_code ?? null;
+
+    // Check if restoring to original
+    const originalGeom = getOriginalGeomColumns(cmd.entityGroup, cmd.id);
+    const isOriginal = JSON.stringify(geomToApply) === JSON.stringify(originalGeom);
+
+    if (isOriginal) {
+      // Remove from geometryChanges
+      const groupGeomChanges = geometryChanges.value.get(cmd.entityGroup);
+      groupGeomChanges?.delete(cmd.id);
+    } else {
+      // Update geometryChanges
+      if (!geometryChanges.value.has(cmd.entityGroup)) {
+        geometryChanges.value.set(cmd.entityGroup, new Map());
+      }
+      const groupGeomChanges = geometryChanges.value.get(cmd.entityGroup)!;
+      if (!groupGeomChanges.has(cmd.id)) {
+        groupGeomChanges.set(cmd.id, {});
+      }
+      Object.assign(groupGeomChanges.get(cmd.id)!, geomToApply);
+    }
+
+    // Update wgs84Features for rendering
+    const currentFeatures = wgs84Features.value[cmd.entityGroup];
+    if (currentFeatures && currentFeatures[cmd.featureIdx]) {
+      const newGeom = geomColumnsToWgs84Geometry(geomToApply, cmd.geomType, cmd.geomKey, epsg);
+      const updatedFeatures = [...currentFeatures];
+      updatedFeatures[cmd.featureIdx] = {
+        ...updatedFeatures[cmd.featureIdx],
+        geometry: newGeom,
+      } as unknown as Feature;
+      wgs84Features.value = { ...wgs84Features.value, [cmd.entityGroup]: updatedFeatures };
+    }
+
+    // Keep shape.length in sync after undo/redo (linestring only, no history entry)
+    if (cmd.geomType === "linestring") {
+      syncShapeLength(cmd.entityGroup, cmd.id, geomToApply, cmd.geomKey);
+    }
+  }
+
   function selectEntityGroup(name: string) {
     entityGroup.value = name;
     selectedId.value = null;
@@ -184,6 +405,11 @@ export const useEditorStore = defineStore("editor", () => {
   }
 
   function clearSelection() {
+    selectedId.value = null;
+  }
+
+  function setEditMode(mode: EditModeKey): void {
+    editModeKey.value = mode;
     selectedId.value = null;
   }
 
@@ -212,10 +438,18 @@ export const useEditorStore = defineStore("editor", () => {
     groupChanges.get(id)![prop] = newValue;
 
     if (!skipHistory) {
-      historyStore.push({ entityGroup: group, id, property: prop, oldValue, newValue });
+      historyStore.push({
+        kind: "property",
+        entityGroup: group,
+        id,
+        property: prop,
+        oldValue,
+        newValue,
+      });
     }
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   function revertProperty(group: string, id: number, prop: string, skipHistory = false) {
     const groupChanges = changes.value.get(group);
     if (!groupChanges) return;
@@ -228,21 +462,27 @@ export const useEditorStore = defineStore("editor", () => {
   }
 
   function applyCommand(cmd: Command, isUndo: boolean) {
+    if (cmd.kind === "geometry") {
+      applyGeometryCommand(cmd, isUndo);
+      return;
+    }
+    // Property command
+    const propCmd = cmd as PropertyCommand;
     if (isUndo) {
-      const groupData = dataset.value?.data?.[cmd.entityGroup] as
+      const groupData = dataset.value?.data?.[propCmd.entityGroup] as
         | Record<string, unknown[]>
         | undefined;
       const ids: number[] = (groupData?.["id"] as number[]) ?? [];
-      const idx = ids.indexOf(cmd.id);
+      const idx = ids.indexOf(propCmd.id);
       const originalValue =
-        idx !== -1 ? (groupData?.[cmd.property] as unknown[])?.[idx] : undefined;
-      if (cmd.oldValue === originalValue) {
-        revertProperty(cmd.entityGroup, cmd.id, cmd.property, true);
+        idx !== -1 ? (groupData?.[propCmd.property] as unknown[])?.[idx] : undefined;
+      if (propCmd.oldValue === originalValue) {
+        revertProperty(propCmd.entityGroup, propCmd.id, propCmd.property, true);
       } else {
-        updateProperty(cmd.entityGroup, cmd.id, cmd.property, cmd.oldValue, true);
+        updateProperty(propCmd.entityGroup, propCmd.id, propCmd.property, propCmd.oldValue, true);
       }
     } else {
-      updateProperty(cmd.entityGroup, cmd.id, cmd.property, cmd.newValue, true);
+      updateProperty(propCmd.entityGroup, propCmd.id, propCmd.property, propCmd.newValue, true);
     }
   }
 
@@ -267,6 +507,8 @@ export const useEditorStore = defineStore("editor", () => {
       await service.patch(datasetUUID.value, patch.value);
       // Reload dataset so dataset.value reflects the saved values
       await loadDataset(datasetUUID.value);
+      // Reinitialize WGS84 features (projection is already loaded)
+      initWgs84Features();
       // Restore selection — loadDataset resets both to null
       entityGroup.value = savedGroup;
       selectedId.value = savedId;
@@ -279,7 +521,10 @@ export const useEditorStore = defineStore("editor", () => {
 
   function clearChanges() {
     changes.value = new Map();
+    geometryChanges.value = new Map();
     historyStore.clear();
+    // Reset wgs84Features from original dataset
+    initWgs84Features();
   }
 
   return {
@@ -288,8 +533,12 @@ export const useEditorStore = defineStore("editor", () => {
     entityGroup,
     selectedId,
     changes,
+    geometryChanges,
+    wgs84Features,
     saving,
     error,
+    editModeKey,
+    editMode,
     entityGroupNames,
     entities,
     selectedEntity,
@@ -298,6 +547,9 @@ export const useEditorStore = defineStore("editor", () => {
     dirtyCount,
     patch,
     loadDataset,
+    initWgs84Features,
+    onGeometryEdit,
+    setEditMode,
     selectEntityGroup,
     selectEntity,
     clearSelection,
