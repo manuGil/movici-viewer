@@ -522,7 +522,6 @@ export const useEditorStore = defineStore("editor", () => {
     }
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   function revertProperty(group: string, id: number, prop: string, skipHistory = false) {
     const groupChanges = changes.value.get(group);
     if (!groupChanges) return;

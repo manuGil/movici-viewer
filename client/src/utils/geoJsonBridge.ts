@@ -54,7 +54,7 @@ export function groupToFeatureCollection(
   const ids = (groupData["id"] as number[]) ?? [];
   const crs = determineCRS(epsg);
 
-  // Non-geometry property keys
+  // geometry property keys
   const geometryKeys = new Set([
     "geometry.x",
     "geometry.y",
