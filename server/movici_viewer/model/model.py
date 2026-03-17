@@ -102,15 +102,35 @@ class Repository:
             ids = group_data.get("id", [])
             id_index = {v: i for i, v in enumerate(ids)}
             patch_ids = properties.get("id", [])
-            for prop_name, values in properties.items():
-                if prop_name == "id":
-                    continue
-                if prop_name not in group_data:
-                    continue
-                for patch_id, new_value in zip(patch_ids, values):
-                    idx = id_index.get(patch_id)
-                    if idx is not None:
-                        group_data[prop_name][idx] = new_value
+            for pos, patch_id in enumerate(patch_ids):
+                idx = id_index.get(patch_id)
+                if idx is not None:
+                    # Update existing entity
+                    for prop_name, values in properties.items():
+                        if prop_name == "id" or prop_name not in group_data:
+                            continue
+                        if pos < len(values):
+                            group_data[prop_name][idx] = values[pos]
+                else:
+                    # Append new entity — use patch values where available, None otherwise
+                    group_data["id"].append(patch_id)
+                    for prop_name in group_data:
+                        if prop_name == "id":
+                            continue
+                        values = properties.get(prop_name, [])
+                        group_data[prop_name].append(values[pos] if pos < len(values) else None)
+        deleted_data = patch.get("deleted", {})
+        for entity_group, ids_to_delete in deleted_data.items():
+            group_data = content.get("data", {}).get(entity_group)
+            if group_data is None:
+                continue
+            ids_to_delete_set = set(ids_to_delete)
+            keep = [
+                i for i, id_ in enumerate(group_data.get("id", [])) if id_ not in ids_to_delete_set
+            ]
+            for prop_name in group_data:
+                group_data[prop_name] = [group_data[prop_name][i] for i in keep]
+
         path.write_text(json.dumps(content, option=json.OPT_INDENT_2).decode())
         self.cache_clear()
 
