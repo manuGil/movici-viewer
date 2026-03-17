@@ -33,4 +33,4 @@ class ViewCrudResponse(BaseModel):
     view_uuid: str = Field(description="UUID of the affected view")
 
 
-ViewCollection.update_forward_refs()
+ViewCollection.model_rebuild()

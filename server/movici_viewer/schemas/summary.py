@@ -34,6 +34,5 @@ class PropertySummary(BaseModel):
     max_val: t.Optional[float] = Field(..., description="Maximum value across all entities")
 
 
-# TODO: update depricated codes
-EntityGroupSummary.update_forward_refs()
-DatasetSummary.update_forward_refs()
+EntityGroupSummary.model_rebuild()
+DatasetSummary.model_rebuild()

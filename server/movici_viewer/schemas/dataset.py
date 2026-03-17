@@ -47,4 +47,4 @@ class DatasetPatch(BaseModel):
     )
 
 
-DatasetCollection.update_forward_refs()
+DatasetCollection.model_rebuild()

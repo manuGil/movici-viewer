@@ -52,5 +52,5 @@ class SimulationInfo(BaseModel):
     time_scale: float = Field(description="Time scale factor")
 
 
-ScenarioCollection.update_forward_refs()
-Scenario.update_forward_refs()
+ScenarioCollection.model_rebuild()
+Scenario.model_rebuild()
