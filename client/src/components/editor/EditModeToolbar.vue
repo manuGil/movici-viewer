@@ -1,6 +1,6 @@
 <template>
   <div class="edit-mode-toolbar">
-    <o-tooltip v-for="mode in modes" :key="mode.key" :label="mode.label" position="right">
+    <o-tooltip v-for="mode in visibleModes" :key="mode.key" :label="mode.label" position="right">
       <o-button
         :variant="store.editModeKey === mode.key ? 'primary' : 'white'"
         size="small"
@@ -14,15 +14,31 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from "vue";
 import { useEditorStore } from "@/stores/useEditorStore";
+import type { EditModeKey } from "@/stores/useEditorStore";
 
 const store = useEditorStore();
 
-const modes = [
-  { key: "view" as const, label: "Select", icon: "mouse-pointer" },
-  { key: "modify" as const, label: "Edit vertices", icon: "project-diagram" },
-  { key: "translate" as const, label: "Move feature", icon: "arrows-alt" },
+const baseModes: { key: EditModeKey; label: string; icon: string }[] = [
+  { key: "view", label: "Select", icon: "mouse-pointer" },
+  { key: "select-rect", label: "Rectangle select", icon: "vector-square" },
+  { key: "modify", label: "Edit vertices", icon: "project-diagram" },
+  { key: "translate", label: "Move feature", icon: "arrows-alt" },
+  { key: "delete", label: "Delete feature", icon: "trash" },
 ];
+
+const drawModes: { key: EditModeKey; label: string; icon: string; geomType: string }[] = [
+  { key: "draw-point", label: "Draw point", icon: "map-pin", geomType: "point" },
+  { key: "draw-line", label: "Draw line", icon: "route", geomType: "linestring" },
+  { key: "draw-polygon", label: "Draw polygon", icon: "draw-polygon", geomType: "polygon" },
+];
+
+const visibleModes = computed(() => {
+  const geomType = store.currentGroupGeometryType;
+  const matchingDrawModes = geomType ? drawModes.filter((m) => m.geomType === geomType) : [];
+  return [...baseModes, ...matchingDrawModes];
+});
 </script>
 
 <style scoped lang="scss">

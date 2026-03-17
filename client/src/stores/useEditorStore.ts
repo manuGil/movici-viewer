@@ -5,7 +5,14 @@ import { useMainStore } from "@/stores/main";
 import LocalDatasetService from "@/api/services/LocalDatasetService";
 import type { DatasetPatch } from "@/api/requests/datasets";
 import type { DatasetWithData } from "@movici-flow-lib/types";
-import { ViewMode, ModifyMode, TranslateMode } from "@deck.gl-community/editable-layers";
+import {
+  ViewMode,
+  ModifyMode,
+  TranslateMode,
+  DrawPointMode,
+  DrawLineStringMode,
+  DrawPolygonMode,
+} from "@deck.gl-community/editable-layers";
 import type { Feature } from "geojson";
 import {
   useEditorHistoryStore,
@@ -25,7 +32,15 @@ import {
 // changes[entityGroup][entityId][propName] = newValue
 type Changes = Map<string, Map<number, Record<string, unknown>>>;
 
-export type EditModeKey = "view" | "modify" | "translate";
+export type EditModeKey =
+  | "view"
+  | "modify"
+  | "translate"
+  | "draw-point"
+  | "draw-line"
+  | "draw-polygon"
+  | "delete"
+  | "select-rect";
 
 export const useEditorStore = defineStore("editor", () => {
   const datasetUUID = ref<string | null>(null);
@@ -35,15 +50,28 @@ export const useEditorStore = defineStore("editor", () => {
   const changes = ref<Changes>(new Map());
   const geometryChanges = ref<Changes>(new Map());
   const wgs84Features = ref<Record<string, Feature[]>>({});
+  // IDs of entities that were created in this editing session (not pre-existing)
+  const newEntityIds = ref<Map<string, Set<number>>>(new Map());
+  // IDs of pre-existing entities deleted in this editing session
+  const deletedEntityIds = ref<Map<string, Set<number>>>(new Map());
+  // IDs selected via rectangle selection (current entity group only)
+  const multiSelectedIds = ref<number[]>([]);
   const saving = ref(false);
   const error = ref<string | null>(null);
 
   // Edit mode
   const editModeKey = ref<EditModeKey>("view");
-  const modeInstances = {
+  const modeInstances: Record<EditModeKey, unknown> = {
     view: new ViewMode(),
     modify: new ModifyMode(),
     translate: new TranslateMode(),
+    "draw-point": new DrawPointMode(),
+    "draw-line": new DrawLineStringMode(),
+    "draw-polygon": new DrawPolygonMode(),
+    // "delete" reuses ViewMode — clicking a feature is intercepted by EditorView's click handler
+    delete: new ViewMode(),
+    // "select-rect" reuses ViewMode — the SelectionLayer handles the rectangle interaction
+    "select-rect": new ViewMode(),
   };
   const editMode = computed(() => modeInstances[editModeKey.value]);
 
@@ -149,12 +177,23 @@ export const useEditorStore = defineStore("editor", () => {
     return found ? [minX, minY, maxX, maxY] : null;
   });
 
+  const currentGroupGeometryType = computed(() => {
+    if (!dataset.value?.data || !entityGroup.value) return null;
+    const groupData = dataset.value.data[entityGroup.value] as
+      | Record<string, unknown[]>
+      | undefined;
+    return groupData ? detectGeometryType(groupData) : null;
+  });
+
   const isDirty = computed(() => {
     for (const groupChanges of changes.value.values()) {
       if (groupChanges.size > 0) return true;
     }
     for (const groupGeomChanges of geometryChanges.value.values()) {
       if (groupGeomChanges.size > 0) return true;
+    }
+    for (const ids of deletedEntityIds.value.values()) {
+      if (ids.size > 0) return true;
     }
     return false;
   });
@@ -166,6 +205,9 @@ export const useEditorStore = defineStore("editor", () => {
     }
     for (const groupGeomChanges of geometryChanges.value.values()) {
       count += groupGeomChanges.size;
+    }
+    for (const ids of deletedEntityIds.value.values()) {
+      count += ids.size;
     }
     return count;
   });
@@ -201,7 +243,15 @@ export const useEditorStore = defineStore("editor", () => {
       data[group] = { id: ids, ...propArrays };
     }
 
-    return { data };
+    // Collect deletions (only pre-existing entities — new entities were never on the server)
+    const deleted: Record<string, number[]> = {};
+    for (const [group, ids] of deletedEntityIds.value) {
+      if (ids.size > 0) {
+        deleted[group] = Array.from(ids);
+      }
+    }
+
+    return { data, ...(Object.keys(deleted).length > 0 ? { deleted } : {}) };
   });
 
   async function loadDataset(uuid: string) {
@@ -212,6 +262,8 @@ export const useEditorStore = defineStore("editor", () => {
     changes.value = new Map();
     geometryChanges.value = new Map();
     wgs84Features.value = {};
+    newEntityIds.value = new Map();
+    deletedEntityIds.value = new Map();
     historyStore.clear();
     error.value = null;
 
@@ -398,6 +450,15 @@ export const useEditorStore = defineStore("editor", () => {
   function selectEntityGroup(name: string) {
     entityGroup.value = name;
     selectedId.value = null;
+    // Reset draw/delete/select modes when switching groups
+    if (
+      ["draw-point", "draw-line", "draw-polygon", "delete", "select-rect"].includes(
+        editModeKey.value,
+      )
+    ) {
+      editModeKey.value = "view";
+    }
+    multiSelectedIds.value = [];
   }
 
   function selectEntity(id: number) {
@@ -406,11 +467,21 @@ export const useEditorStore = defineStore("editor", () => {
 
   function clearSelection() {
     selectedId.value = null;
+    multiSelectedIds.value = [];
   }
 
   function setEditMode(mode: EditModeKey): void {
     editModeKey.value = mode;
     selectedId.value = null;
+    if (mode !== "select-rect") {
+      multiSelectedIds.value = [];
+    }
+  }
+
+  function setMultiSelection(ids: number[]): void {
+    multiSelectedIds.value = ids;
+    // If exactly one entity selected, mirror into selectedId for the properties panel
+    selectedId.value = ids.length === 1 ? ids[0]! : null;
   }
 
   function updateProperty(
@@ -519,9 +590,113 @@ export const useEditorStore = defineStore("editor", () => {
     }
   }
 
+  function addEntity(groupName: string, newFeature: Feature, epsg: number | null): void {
+    const groupData = dataset.value?.data?.[groupName] as Record<string, unknown[]> | undefined;
+    if (!groupData) return;
+
+    const geomType = detectGeometryType(groupData);
+    if (!geomType) return;
+    const geomKey = getGeometryKey(groupData, geomType);
+
+    // Generate a unique ID (max existing + 1)
+    const ids = (groupData["id"] as number[]) ?? [];
+    const newId = ids.length > 0 ? Math.max(...ids) + 1 : 1;
+
+    // Extract geometry in dataset CRS
+    const geomColumns = extractGeometryColumns(newFeature as any, geomType, geomKey, epsg);
+
+    // Add new row to dataset columnar data
+    (groupData["id"] as number[]).push(newId);
+    for (const key of Object.keys(groupData)) {
+      if (key === "id") continue;
+      const geomValue = geomColumns[key];
+      (groupData[key] as unknown[]).push(geomValue !== undefined ? geomValue : null);
+    }
+
+    // Update wgs84Features with the correct __id in properties
+    const newFeatureWithId: Feature = {
+      ...newFeature,
+      properties: { ...(newFeature.properties ?? {}), __id: newId },
+    };
+    const currentFeatures = wgs84Features.value[groupName] ?? [];
+    wgs84Features.value = {
+      ...wgs84Features.value,
+      [groupName]: [...currentFeatures, newFeatureWithId],
+    };
+
+    // Track geometry as changed (so patch includes this entity)
+    if (!geometryChanges.value.has(groupName)) {
+      geometryChanges.value.set(groupName, new Map());
+    }
+    geometryChanges.value.get(groupName)!.set(newId, { ...geomColumns });
+
+    // Track as new entity
+    if (!newEntityIds.value.has(groupName)) {
+      newEntityIds.value.set(groupName, new Set());
+    }
+    newEntityIds.value.get(groupName)!.add(newId);
+
+    // Recompute shape.length for new linestring entities
+    if (geomType === "linestring") {
+      syncShapeLength(groupName, newId, geomColumns, geomKey);
+    }
+
+    // Select the new entity and switch back to view mode
+    entityGroup.value = groupName;
+    selectedId.value = newId;
+    editModeKey.value = "view";
+  }
+
+  function deleteEntity(groupName: string, id: number): void {
+    // Remove the row from columnar dataset data
+    const groupData = dataset.value?.data?.[groupName] as Record<string, unknown[]> | undefined;
+    if (groupData) {
+      const ids = (groupData["id"] as number[]) ?? [];
+      const dataIdx = ids.indexOf(id);
+      if (dataIdx !== -1) {
+        for (const key of Object.keys(groupData)) {
+          (groupData[key] as unknown[]).splice(dataIdx, 1);
+        }
+      }
+    }
+
+    // Remove from wgs84Features
+    const features = wgs84Features.value[groupName] ?? [];
+    wgs84Features.value = {
+      ...wgs84Features.value,
+      [groupName]: features.filter((f) => (f as any).properties?.__id !== id),
+    };
+
+    // Discard any pending changes for this entity
+    changes.value.get(groupName)?.delete(id);
+    geometryChanges.value.get(groupName)?.delete(id);
+
+    // If the entity was created this session, just forget it — no need to tell the server
+    const isNew = newEntityIds.value.get(groupName)?.has(id) ?? false;
+    if (isNew) {
+      newEntityIds.value.get(groupName)?.delete(id);
+    } else {
+      // Track for deletion in the next patch
+      if (!deletedEntityIds.value.has(groupName)) {
+        deletedEntityIds.value.set(groupName, new Set());
+      }
+      deletedEntityIds.value.get(groupName)!.add(id);
+    }
+
+    // Clear selection if this entity was selected
+    if (selectedId.value === id && entityGroup.value === groupName) {
+      selectedId.value = null;
+    }
+
+    // Return to view mode after deletion
+    editModeKey.value = "view";
+  }
+
   function clearChanges() {
     changes.value = new Map();
     geometryChanges.value = new Map();
+    newEntityIds.value = new Map();
+    deletedEntityIds.value = new Map();
     historyStore.clear();
     // Reset wgs84Features from original dataset
     initWgs84Features();
@@ -535,6 +710,8 @@ export const useEditorStore = defineStore("editor", () => {
     changes,
     geometryChanges,
     wgs84Features,
+    newEntityIds,
+    multiSelectedIds,
     saving,
     error,
     editModeKey,
@@ -543,13 +720,17 @@ export const useEditorStore = defineStore("editor", () => {
     entities,
     selectedEntity,
     boundingBox,
+    currentGroupGeometryType,
     isDirty,
     dirtyCount,
     patch,
     loadDataset,
     initWgs84Features,
     onGeometryEdit,
+    addEntity,
+    deleteEntity,
     setEditMode,
+    setMultiSelection,
     selectEntityGroup,
     selectEntity,
     clearSelection,
