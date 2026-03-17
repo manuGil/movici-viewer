@@ -45,6 +45,13 @@ class DatasetPatch(BaseModel):
             'e.g. {"road_segment_entities": {"id": [1, 2], "label": [0, 1]}}'
         )
     )
+    deleted: t.Dict[str, t.List[int]] = Field(
+        default_factory=dict,
+        description=(
+            "Entity IDs to delete, keyed by entity group name. "
+            'e.g. {"road_segment_entities": [1, 2]}'
+        ),
+    )
 
 
 DatasetCollection.model_rebuild()
