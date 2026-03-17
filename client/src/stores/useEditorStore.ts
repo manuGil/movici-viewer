@@ -19,6 +19,8 @@ import {
   type Command,
   type PropertyCommand,
   type GeometryCommand,
+  type DeleteCommand,
+  type CreateCommand,
 } from "./useEditorHistoryStore";
 import {
   detectGeometryType,
@@ -532,9 +534,100 @@ export const useEditorStore = defineStore("editor", () => {
     }
   }
 
+  function restoreEntity(params: {
+    entityGroup: string;
+    id: number;
+    isNew: boolean;
+    dataIdx: number;
+    rowData: Record<string, unknown>;
+    wgs84FeatureIdx: number;
+    wgs84Feature: Feature;
+    pendingChanges?: Record<string, unknown>;
+    pendingGeomChanges?: Record<string, unknown>;
+  }) {
+    const {
+      entityGroup: group,
+      id,
+      isNew,
+      dataIdx,
+      rowData,
+      wgs84FeatureIdx,
+      wgs84Feature,
+      pendingChanges,
+      pendingGeomChanges,
+    } = params;
+
+    // Restore the entity row into columnar data at its original index
+    const groupData = dataset.value?.data?.[group] as Record<string, unknown[]> | undefined;
+    if (groupData) {
+      for (const [key, value] of Object.entries(rowData)) {
+        if (groupData[key]) {
+          (groupData[key] as unknown[]).splice(dataIdx, 0, value);
+        }
+      }
+    }
+
+    // Restore wgs84Feature at its original index
+    const currentFeatures = [...(wgs84Features.value[group] ?? [])];
+    currentFeatures.splice(wgs84FeatureIdx, 0, wgs84Feature);
+    wgs84Features.value = { ...wgs84Features.value, [group]: currentFeatures };
+
+    // Restore any pending property/geometry changes
+    if (pendingChanges) {
+      if (!changes.value.has(group)) changes.value.set(group, new Map());
+      changes.value.get(group)!.set(id, { ...pendingChanges });
+    }
+    if (pendingGeomChanges) {
+      if (!geometryChanges.value.has(group)) geometryChanges.value.set(group, new Map());
+      geometryChanges.value.get(group)!.set(id, { ...pendingGeomChanges });
+    }
+
+    // Restore tracking state
+    if (isNew) {
+      if (!newEntityIds.value.has(group)) newEntityIds.value.set(group, new Set());
+      newEntityIds.value.get(group)!.add(id);
+    } else {
+      deletedEntityIds.value.get(group)?.delete(id);
+    }
+  }
+
+  function applyDeleteCommand(cmd: DeleteCommand, isUndo: boolean) {
+    if (isUndo) {
+      restoreEntity(cmd);
+    } else {
+      deleteEntity(cmd.entityGroup, cmd.id, true);
+    }
+  }
+
+  function applyCreateCommand(cmd: CreateCommand, isUndo: boolean) {
+    if (isUndo) {
+      // Entity is still in newEntityIds — deleteEntity handles the rest correctly
+      deleteEntity(cmd.entityGroup, cmd.id, true);
+    } else {
+      restoreEntity({
+        entityGroup: cmd.entityGroup,
+        id: cmd.id,
+        isNew: true,
+        dataIdx: cmd.dataIdx,
+        rowData: cmd.rowData,
+        wgs84FeatureIdx: cmd.wgs84FeatureIdx,
+        wgs84Feature: cmd.wgs84Feature,
+        pendingGeomChanges: cmd.geomColumns,
+      });
+    }
+  }
+
   function applyCommand(cmd: Command, isUndo: boolean) {
     if (cmd.kind === "geometry") {
       applyGeometryCommand(cmd, isUndo);
+      return;
+    }
+    if (cmd.kind === "delete") {
+      applyDeleteCommand(cmd as DeleteCommand, isUndo);
+      return;
+    }
+    if (cmd.kind === "create") {
+      applyCreateCommand(cmd as CreateCommand, isUndo);
       return;
     }
     // Property command
@@ -605,6 +698,10 @@ export const useEditorStore = defineStore("editor", () => {
     // Extract geometry in dataset CRS
     const geomColumns = extractGeometryColumns(newFeature as any, geomType, geomKey, epsg);
 
+    // Record positions before inserting (for undo)
+    const dataIdx = ids.length; // will be appended at this index
+    const wgs84FeatureIdx = (wgs84Features.value[groupName] ?? []).length;
+
     // Add new row to dataset columnar data
     (groupData["id"] as number[]).push(newId);
     for (const key of Object.keys(groupData)) {
@@ -641,30 +738,67 @@ export const useEditorStore = defineStore("editor", () => {
       syncShapeLength(groupName, newId, geomColumns, geomKey);
     }
 
+    // Build the rowData snapshot for undo (all columns for this new entity)
+    const rowData: Record<string, unknown> = {};
+    for (const key of Object.keys(groupData)) {
+      const arr = groupData[key] as unknown[];
+      rowData[key] = arr[arr.length - 1];
+    }
+
+    // Push to history so the draw can be undone
+    historyStore.push({
+      kind: "create",
+      entityGroup: groupName,
+      id: newId,
+      dataIdx,
+      rowData,
+      wgs84FeatureIdx,
+      wgs84Feature: newFeatureWithId,
+      geomColumns: { ...geomColumns },
+    } as CreateCommand);
+
     // Select the new entity and switch back to view mode
     entityGroup.value = groupName;
     selectedId.value = newId;
     editModeKey.value = "view";
   }
 
-  function deleteEntity(groupName: string, id: number): void {
-    // Remove the row from columnar dataset data
+  function deleteEntity(groupName: string, id: number, skipHistory = false): void {
+    // Capture snapshot before mutating (needed for undo)
     const groupData = dataset.value?.data?.[groupName] as Record<string, unknown[]> | undefined;
+    let dataIdx = -1;
+    const rowData: Record<string, unknown> = {};
     if (groupData) {
       const ids = (groupData["id"] as number[]) ?? [];
-      const dataIdx = ids.indexOf(id);
+      dataIdx = ids.indexOf(id);
       if (dataIdx !== -1) {
         for (const key of Object.keys(groupData)) {
-          (groupData[key] as unknown[]).splice(dataIdx, 1);
+          rowData[key] = (groupData[key] as unknown[])[dataIdx];
         }
+      }
+    }
+    const allFeatures = wgs84Features.value[groupName] ?? [];
+    const wgs84FeatureIdx = allFeatures.findIndex((f) => (f as any).properties?.__id === id);
+    const wgs84Feature = wgs84FeatureIdx !== -1 ? allFeatures[wgs84FeatureIdx] : null;
+    const pendingChanges = changes.value.get(groupName)?.get(id)
+      ? { ...changes.value.get(groupName)!.get(id)! }
+      : undefined;
+    const pendingGeomChanges = geometryChanges.value.get(groupName)?.get(id)
+      ? { ...geometryChanges.value.get(groupName)!.get(id)! }
+      : undefined;
+    const isNew = newEntityIds.value.get(groupName)?.has(id) ?? false;
+
+    // Remove the row from columnar dataset data
+    if (groupData && dataIdx !== -1) {
+      for (const key of Object.keys(groupData)) {
+        (groupData[key] as unknown[]).splice(dataIdx, 1);
       }
     }
 
     // Remove from wgs84Features
-    const features = wgs84Features.value[groupName] ?? [];
     wgs84Features.value = {
       ...wgs84Features.value,
-      [groupName]: features.filter((f) => (f as any).properties?.__id !== id),
+      [groupName]: allFeatures.filter((f) => (f as any).properties?.__id !== id),
     };
 
     // Discard any pending changes for this entity
@@ -672,7 +806,6 @@ export const useEditorStore = defineStore("editor", () => {
     geometryChanges.value.get(groupName)?.delete(id);
 
     // If the entity was created this session, just forget it — no need to tell the server
-    const isNew = newEntityIds.value.get(groupName)?.has(id) ?? false;
     if (isNew) {
       newEntityIds.value.get(groupName)?.delete(id);
     } else {
@@ -686,6 +819,22 @@ export const useEditorStore = defineStore("editor", () => {
     // Clear selection if this entity was selected
     if (selectedId.value === id && entityGroup.value === groupName) {
       selectedId.value = null;
+    }
+
+    // Push to history so undo/redo works (skip for redo replays)
+    if (!skipHistory && wgs84Feature) {
+      historyStore.push({
+        kind: "delete",
+        entityGroup: groupName,
+        id,
+        isNew,
+        dataIdx,
+        rowData,
+        wgs84FeatureIdx,
+        wgs84Feature,
+        pendingChanges,
+        pendingGeomChanges,
+      } as DeleteCommand);
     }
 
     // Return to view mode after deletion

@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
 import type { GeometryType } from "@/utils/geoJsonBridge";
+import type { Feature } from "geojson";
 
 export interface PropertyCommand {
   kind: "property";
@@ -22,7 +23,31 @@ export interface GeometryCommand {
   newGeomColumns: Record<string, unknown>;
 }
 
-export type Command = PropertyCommand | GeometryCommand;
+export interface DeleteCommand {
+  kind: "delete";
+  entityGroup: string;
+  id: number;
+  isNew: boolean;
+  dataIdx: number;
+  rowData: Record<string, unknown>;
+  wgs84FeatureIdx: number;
+  wgs84Feature: Feature;
+  pendingChanges: Record<string, unknown> | undefined;
+  pendingGeomChanges: Record<string, unknown> | undefined;
+}
+
+export interface CreateCommand {
+  kind: "create";
+  entityGroup: string;
+  id: number;
+  dataIdx: number;
+  rowData: Record<string, unknown>;
+  wgs84FeatureIdx: number;
+  wgs84Feature: Feature;
+  geomColumns: Record<string, unknown>;
+}
+
+export type Command = PropertyCommand | GeometryCommand | DeleteCommand | CreateCommand;
 
 export const useEditorHistoryStore = defineStore("editorHistory", () => {
   const undoStack = ref<Command[]>([]);
