@@ -67,13 +67,15 @@ function registerOn(on: (event: "click", callbacks: Record<string, DeckEventCall
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const layerId: string = (info as any).layer?.id ?? "";
         const groupMatch = layerId.match(/^editor-(.+)$/);
-        if (groupMatch?.[1]) {
-          const clickedGroup = groupMatch[1];
-          if (clickedGroup !== store.entityGroup) {
-            store.selectEntityGroup(clickedGroup);
-          }
+        const clickedGroup = groupMatch?.[1] ?? store.entityGroup ?? "";
+        if (clickedGroup && clickedGroup !== store.entityGroup) {
+          store.selectEntityGroup(clickedGroup);
         }
-        store.selectEntity(entityId as number);
+        if (store.editModeKey === "delete") {
+          store.deleteEntity(clickedGroup, entityId as number);
+        } else {
+          store.selectEntity(entityId as number);
+        }
       } else {
         store.clearSelection();
       }

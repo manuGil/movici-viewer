@@ -148,6 +148,7 @@ export class GetScenarioState<T = any> extends Request<DatasetWithData<T>> {
 
 export interface DatasetPatch {
   data: Record<string, Record<string, unknown[]>>;
+  deleted?: Record<string, number[]>;
 }
 
 export class PatchDataset extends Request<void> {
