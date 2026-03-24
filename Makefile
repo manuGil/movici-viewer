@@ -21,7 +21,7 @@ init: pre-init ui
 	&& poetry env use python3.13 \
 	&& poetry install --extras dev
 
-data_dir=/tests/data/
+data_dir=tests/data/
 port=5000
 
 export data_dir
