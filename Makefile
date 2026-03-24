@@ -21,6 +21,7 @@ pre-init:
 # 	&& poetry env use python3.13 \ 
 init: pre-init ui
 	cd server \
+	&& poetry env use python3.13 \
 	&& poetry install --extras dev
 
 data_dir=/tests/data
