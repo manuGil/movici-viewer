@@ -1,12 +1,10 @@
 {
-  "name": "lines",
-  "display_name": "Lines Test Layer",
-  "type": "line_layer",
+  "name": "road_network",
+  "display_name": "Roads Test Layer",
+  "type": "transport_network",
   "format": "entity_based",
   "bounding_box": null,
   "epsg_code": 28992,
-  "created_on": 1598965524,
-  "last_modified": 1598965525,
   "version": 3,
   "general": {
     "enum": {
