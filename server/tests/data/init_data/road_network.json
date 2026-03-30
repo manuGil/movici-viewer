@@ -1,6 +1,6 @@
 {
   "name": "road_network",
-  "display_name": "Roads Test Layer",
+  "display_name": "Roads",
   "type": "transport_network",
   "format": "entity_based",
   "bounding_box": null,
@@ -15,7 +15,7 @@
     }
   },
   "data": {
-    "line_entities": {
+    "road_segment_entities": {
       "id": [
         1,
         2,
