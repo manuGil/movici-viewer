@@ -1,12 +1,10 @@
 {
-  "name": "polygons",
-  "display_name": "Polygon Test Layer",
-  "type": "polygon_layer",
+  "name": "zones",
+  "display_name": "Zones Test Layer",
+  "type": "area_set",
   "format": "entity_based",
   "bounding_box": null,
   "epsg_code": 28992,
-  "created_on": 1598965524,
-  "last_modified": 1598965525,
   "version": 1,
   "general": {
     "enum": {
