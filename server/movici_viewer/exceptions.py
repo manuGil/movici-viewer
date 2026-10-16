@@ -45,6 +45,39 @@ class Conflict(ServerError):
         return f"{self.kind} '{self.name}' already exists"
 
 
+class InvalidName(ServerError):
+    status_code = 422
+
+    def __init__(self, kind, name):
+        self.kind = kind
+        self.name = name
+
+    def __str__(self):
+        return f"'{self.name}' is not a valid {self.kind} name"
+
+
+class NotEditable(ServerError):
+    status_code = 422
+
+    def __init__(self, kind, name):
+        self.kind = kind
+        self.name = name
+
+    def __str__(self):
+        return f"{self.kind} '{self.name}' cannot be edited"
+
+
+class InvalidPatch(ServerError):
+    status_code = 422
+
+    def __init__(self, entity_group: str, reason: str):
+        self.entity_group = entity_group
+        self.reason = reason
+
+    def __str__(self):
+        return f"invalid patch for entity group '{self.entity_group}': {self.reason}"
+
+
 def add_exception_handling(app: FastAPI):
     app.add_exception_handler(ServerError, format_server_error)
     app.add_exception_handler(HTTPException, format_http_exception)
