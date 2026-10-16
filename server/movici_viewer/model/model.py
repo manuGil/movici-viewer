@@ -26,7 +26,15 @@ from movici_viewer.model.file_info import (
 )
 
 from ..caching import cache_clear, memoize
-from ..exceptions import Conflict, InvalidObject, NotFound
+from ..exceptions import (
+    Conflict,
+    InvalidName,
+    InvalidObject,
+    InvalidPatch,
+    NotEditable,
+    NotFound,
+)
+from ..schemas.dataset import DatasetCreate, DatasetPatch, PatchEntityGroup
 from ..schemas.view import InView
 
 
@@ -61,6 +69,16 @@ class Repository:
 
     def get_dataset_data(self, uuid: str) -> Path:
         return self.source.get_dataset_path(uuid)
+
+    def add_dataset(self, payload: DatasetCreate):
+        name = self.source.add_dataset(payload)
+        return self.source.get_dataset_by_name(name)
+
+    def patch_dataset(self, uuid: str, payload: DatasetPatch):
+        self.source.patch_dataset(uuid, payload.data, payload.nulls_overwrite)
+        # Dataset metadata and summaries are memoized; without clearing them the
+        # summary endpoint would keep serving pre-patch values until restart
+        self.cache_clear()
 
     def get_state(self, scenario_uuid: str, dataset_uuid: str, timestamp: t.Optional[int] = None):
         if self.active_scenario != scenario_uuid:
@@ -422,6 +440,128 @@ class DirectorySource:
             raise NotFound("view", view_uuid)
         target_path.unlink(missing_ok=True)
         return view_uuid
+
+    def add_dataset(self, payload: DatasetCreate) -> str:
+        name = snake_case(payload.name)
+        if not name:
+            raise InvalidName("dataset", payload.name)
+        try:
+            self.get_dataset_path(name)
+        except NotFound:
+            pass
+        else:
+            raise Conflict("dataset", name)
+
+        content = {
+            "name": name,
+            "display_name": payload.display_name or payload.name,
+            "type": payload.type,
+            "format": dataset_format_from_type(payload.type),
+            "epsg_code": payload.epsg_code,
+            "general": payload.general or {},
+            # Entity groups and their entities are added afterwards through PATCH
+            "data": {},
+        }
+        path = self.init_data_dir / f"{name}.json"
+        path.write_bytes(json.dumps(content, option=json.OPT_INDENT_2))
+        return name
+
+    def patch_dataset(
+        self,
+        dataset: str,
+        data: t.Dict[str, PatchEntityGroup],
+        nulls_overwrite: bool = False,
+    ):
+        path = self.get_dataset_path(dataset)
+        if path.suffix != ".json":
+            raise NotEditable("dataset", dataset)
+        try:
+            content = json.loads(path.read_bytes())
+        except (JSONDecodeError, OSError) as e:
+            raise InvalidObject("dataset", dataset, exception=e) from e
+        dataset_data = content.get("data")
+        if not isinstance(dataset_data, dict):
+            raise NotEditable("dataset", dataset)
+
+        for group_name, group_patch in data.items():
+            group = dataset_data.get(group_name)
+            if group is not None and not isinstance(group, dict):
+                raise NotFound("entity group", group_name)
+            if group is None and (
+                not group_patch.id or any(entity_id != -1 for entity_id in group_patch.id)
+            ):
+                raise NotFound("entity group", group_name)
+
+            expected = len(group_patch.id)
+            for column_name, values in group_patch.columns():
+                if not isinstance(values, list):
+                    raise InvalidPatch(group_name, f"column '{column_name}' is not an array")
+                if len(values) != expected:
+                    raise InvalidPatch(
+                        group_name,
+                        f"column '{column_name}' has {len(values)} value(s) "
+                        f"but 'id' has {expected}",
+                    )
+
+            if group_patch.deleted:
+                for entity_id, flag in zip(group_patch.id, group_patch.deleted):
+                    if flag and entity_id == -1:
+                        raise InvalidPatch(group_name, "cannot delete a new entity with id -1")
+
+        for group_name, group_patch in data.items():
+            group = dataset_data.setdefault(group_name, {})
+            self._apply_group_patch(group_name, group, group_patch, nulls_overwrite)
+
+        path.write_bytes(json.dumps(content, option=json.OPT_INDENT_2))
+
+    @staticmethod
+    def _apply_group_patch(
+        group_name: str,
+        group: dict,
+        patch: PatchEntityGroup,
+        nulls_overwrite: bool,
+    ):
+        id_column = group.setdefault("id", [])
+        deleted = patch.deleted or [False] * len(patch.id)
+        next_id = max(id_column, default=-1) + 1
+
+        for pos, entity_id in enumerate(patch.id):
+            if deleted[pos]:
+                continue
+            if entity_id == -1:
+                #  Assigns a fresh id to a new entity
+                index = len(id_column)
+                id_column.append(next_id)
+                next_id += 1
+                for key, column in group.items():
+                    if key != "id":
+                        column.append(None)
+            else:
+                try:
+                    index = id_column.index(entity_id)
+                except ValueError:
+                    # Unknown id
+                    index = len(id_column)
+                    id_column.append(entity_id)
+                    for key, column in group.items():
+                        if key != "id":
+                            column.append(None)
+            for key, values in patch.attributes.items():
+                value = values[pos]
+                if value is None and not nulls_overwrite:
+                    # A hole: this entity did not change this attribute
+                    continue
+                if key not in group:
+                    group[key] = [None] * len(id_column)
+                group[key][index] = value
+
+        for entity_id in (eid for eid, flag in zip(patch.id, deleted) if flag):
+            try:
+                index = id_column.index(entity_id)
+            except ValueError:
+                raise NotFound("entity", f"{group_name}/{entity_id}") from None
+            for column in group.values():
+                del column[index]
 
 
 @dataclasses.dataclass
