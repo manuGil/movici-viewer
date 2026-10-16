@@ -28,5 +28,5 @@ class PropertySummary(BaseModel):
     max_val: t.Optional[float] = ...
 
 
-EntityGroupSummary.update_forward_refs()
-DatasetSummary.update_forward_refs()
+EntityGroupSummary.model_rebuild()
+DatasetSummary.model_rebuild()
