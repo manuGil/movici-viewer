@@ -1,5 +1,5 @@
-import type { CAPABILITIES } from "@movici-flow-lib/api";
-import type { Backend, IClient } from "@movici-flow-lib/types";
+import { CAPABILITIES } from "@movici-flow-lib/api";
+import type { Backend, BackendCapability, IClient } from "@movici-flow-lib/types";
 import LocalDatasetService from "./services/LocalDatasetService";
 import LocalGeocodeService from "./services/LocalGeocodeService";
 import DummyProjectService from "./services/LocalProjectService";
@@ -31,7 +31,7 @@ export default class LocalBackend implements Backend {
     this.fetch = new LocalFetchRequestService(client);
   }
 
-  getCapabilities(): CAPABILITIES[] {
-    return [];
+  getCapabilities(): BackendCapability[] {
+    return [CAPABILITIES.PATCH_DATASETS];
   }
 }

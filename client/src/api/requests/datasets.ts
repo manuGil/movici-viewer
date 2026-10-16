@@ -1,6 +1,13 @@
 import { Request } from "@movici-flow-lib/api/requests/base";
 import uri from "./uri";
-import type { DataAttribute, Dataset, DatasetWithData, UUID } from "@movici-flow-lib/types";
+import type {
+  DataAttribute,
+  Dataset,
+  DatasetPatch,
+  DatasetWithData,
+  IClient,
+  UUID,
+} from "@movici-flow-lib/types";
 import type { AxiosRequestConfig, AxiosResponse } from "axios";
 
 export interface DatasetFilter {
@@ -46,8 +53,21 @@ export class GetDataset extends Request<Dataset> {
   }
 }
 
+/** Base class for requests against the mutable dataset data endpoint (required by patch
+ * capability). Sends "Cache-Control: no-cache" so the browser revalidates with the server
+ * instead of serving a heuristically-fresh cache entry: the file changes when a dataset is
+ * saved in the editor, and stale reads would revert the editor to pre-save data.
+ */
+abstract class UncachedRequest<Resp> extends Request<Resp> {
+  generateConfig(client: IClient): AxiosRequestConfig {
+    const config = super.generateConfig(client);
+    config.headers = { ...config.headers, "Cache-Control": "no-cache" };
+    return config;
+  }
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export class GetDatasetData<T = any> extends Request<DatasetWithData<T>> {
+export class GetDatasetData<T = any> extends UncachedRequest<DatasetWithData<T>> {
   datasetUUID: string;
   entityGroup?: string;
   properties?: DataAttribute[];
@@ -73,7 +93,7 @@ export class GetDatasetData<T = any> extends Request<DatasetWithData<T>> {
   }
 }
 
-export class GetDatasetDataAsBlob extends Request<{ data: Blob; contentType: string }> {
+export class GetDatasetDataAsBlob extends UncachedRequest<{ data: Blob; contentType: string }> {
   datasetUUID: string;
   entityGroup?: string;
   properties?: DataAttribute[];
@@ -143,6 +163,28 @@ export class GetScenarioState<T = any> extends Request<DatasetWithData<T>> {
       params.timestamp = this.timestamp;
     }
     return params;
+  }
+}
+
+export class PatchDataset extends Request<void> {
+  datasetUUID: UUID;
+  patch: DatasetPatch;
+
+  constructor(datasetUUID: UUID, patch: DatasetPatch) {
+    super();
+    this.datasetUUID = datasetUUID;
+    this.patch = patch;
+  }
+
+  makeRequest(): AxiosRequestConfig {
+    return {
+      method: "patch",
+      url: `${uri.datasets}/${this.datasetUUID}`,
+      data: this.patch,
+    };
+  }
+  makeResponse(): void {
+    return;
   }
 }
 
